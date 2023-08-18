@@ -90,12 +90,14 @@ import com.facebook.presto.operator.aggregation.VarianceAggregation;
 import com.facebook.presto.operator.aggregation.arrayagg.ArrayAggregationFunction;
 import com.facebook.presto.operator.aggregation.differentialentropy.DifferentialEntropyAggregation;
 import com.facebook.presto.operator.aggregation.histogram.Histogram;
+import com.facebook.presto.operator.aggregation.multimapagg.AlternativeMultimapAggregationFunction;
 import com.facebook.presto.operator.aggregation.multimapagg.MultimapAggregationFunction;
 import com.facebook.presto.operator.scalar.ArrayAllMatchFunction;
 import com.facebook.presto.operator.scalar.ArrayAnyMatchFunction;
 import com.facebook.presto.operator.scalar.ArrayCardinalityFunction;
 import com.facebook.presto.operator.scalar.ArrayCombinationsFunction;
 import com.facebook.presto.operator.scalar.ArrayContains;
+import com.facebook.presto.operator.scalar.ArrayCumSum;
 import com.facebook.presto.operator.scalar.ArrayDistinctFromOperator;
 import com.facebook.presto.operator.scalar.ArrayDistinctFunction;
 import com.facebook.presto.operator.scalar.ArrayElementAtFunction;
@@ -183,6 +185,7 @@ import com.facebook.presto.operator.scalar.sql.ArraySqlFunctions;
 import com.facebook.presto.operator.scalar.sql.MapNormalizeFunction;
 import com.facebook.presto.operator.scalar.sql.MapSqlFunctions;
 import com.facebook.presto.operator.scalar.sql.SimpleSamplingPercent;
+import com.facebook.presto.operator.scalar.sql.StringSqlFunctions;
 import com.facebook.presto.operator.window.CumulativeDistributionFunction;
 import com.facebook.presto.operator.window.DenseRankFunction;
 import com.facebook.presto.operator.window.FirstValueFunction;
@@ -682,6 +685,7 @@ public class BuiltInTypeAndFunctionNamespaceManager
                 .aggregates(ClassificationPrecisionAggregation.class)
                 .aggregates(ClassificationRecallAggregation.class)
                 .aggregates(ClassificationThresholdsAggregation.class)
+                .scalar(ArrayCumSum.class)
                 .scalar(RepeatFunction.class)
                 .scalars(SequenceFunction.class)
                 .scalars(SessionFunctions.class)
@@ -848,7 +852,6 @@ public class BuiltInTypeAndFunctionNamespaceManager
                 .functions(MAP_CONSTRUCTOR, MAP_TO_JSON, JSON_TO_MAP, JSON_STRING_TO_MAP)
                 .functions(MAP_AGG, MAP_UNION, MAP_UNION_SUM)
                 .function(new ReduceAggregationFunction(featuresConfig.isReduceAggForComplexTypesEnabled()))
-                .function(new MultimapAggregationFunction(featuresConfig.getMultimapAggGroupImplementation()))
                 .functions(DECIMAL_TO_VARCHAR_CAST, DECIMAL_TO_INTEGER_CAST, DECIMAL_TO_BIGINT_CAST, DECIMAL_TO_DOUBLE_CAST, DECIMAL_TO_REAL_CAST, DECIMAL_TO_BOOLEAN_CAST, DECIMAL_TO_TINYINT_CAST, DECIMAL_TO_SMALLINT_CAST)
                 .functions(VARCHAR_TO_DECIMAL_CAST, INTEGER_TO_DECIMAL_CAST, BIGINT_TO_DECIMAL_CAST, DOUBLE_TO_DECIMAL_CAST, REAL_TO_DECIMAL_CAST, BOOLEAN_TO_DECIMAL_CAST, TINYINT_TO_DECIMAL_CAST, SMALLINT_TO_DECIMAL_CAST)
                 .functions(JSON_TO_DECIMAL_CAST, DECIMAL_TO_JSON_CAST)
@@ -902,6 +905,7 @@ public class BuiltInTypeAndFunctionNamespaceManager
                 .sqlInvokedScalars(ArrayIntersectFunction.class)
                 .sqlInvokedScalars(MapSqlFunctions.class)
                 .sqlInvokedScalars(SimpleSamplingPercent.class)
+                .sqlInvokedScalars(StringSqlFunctions.class)
                 .scalar(DynamicFilterPlaceholderFunction.class)
                 .scalars(EnumCasts.class)
                 .scalars(LongEnumOperators.class)
@@ -939,6 +943,7 @@ public class BuiltInTypeAndFunctionNamespaceManager
             builder.override(MAX_BY, ALTERNATIVE_MAX_BY);
             builder.override(MIN_BY, ALTERNATIVE_MIN_BY);
             builder.functions(AlternativeApproxPercentile.getFunctions());
+            builder.function(new AlternativeMultimapAggregationFunction(featuresConfig.getMultimapAggGroupImplementation()));
         }
         else {
             builder.aggregates(ApproximateLongPercentileAggregations.class);
@@ -947,6 +952,7 @@ public class BuiltInTypeAndFunctionNamespaceManager
             builder.aggregates(ApproximateDoublePercentileArrayAggregations.class);
             builder.aggregates(ApproximateRealPercentileAggregations.class);
             builder.aggregates(ApproximateRealPercentileArrayAggregations.class);
+            builder.function(new MultimapAggregationFunction(featuresConfig.getMultimapAggGroupImplementation()));
         }
 
         return builder.getFunctions();
@@ -1114,7 +1120,7 @@ public class BuiltInTypeAndFunctionNamespaceManager
         }
     }
 
-    public AggregationFunctionImplementation getAggregateFunctionImplementation(FunctionHandle functionHandle)
+    public AggregationFunctionImplementation getAggregateFunctionImplementation(FunctionHandle functionHandle, TypeManager typeManager)
     {
         checkArgument(functionHandle instanceof BuiltInFunctionHandle, "Expect BuiltInFunctionHandle");
         Signature signature = ((BuiltInFunctionHandle) functionHandle).getSignature();

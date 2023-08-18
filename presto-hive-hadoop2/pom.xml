@@ -5,7 +5,7 @@
     <parent>
         <groupId>com.facebook.presto</groupId>
         <artifactId>presto-root</artifactId>
-        <version>0.280-SNAPSHOT</version>
+        <version>0.284-SNAPSHOT</version>
     </parent>
 
     <artifactId>presto-hive-hadoop2</artifactId>
@@ -175,6 +175,8 @@
                                 <exclude>**/TestHiveFileSystemS3.java</exclude>
                                 <exclude>**/TestHiveFileSystemS3SelectCsvPushdown.java</exclude>
                                 <exclude>**/TestHiveFileSystemS3SelectJsonPushdown.java</exclude>
+                                <exclude>**/TestHiveFileSystemS3SelectCsvPushdownWithSplits.java</exclude>
+                                <exclude>**/TestHiveFileSystemS3SelectJsonPushdownWithSplits.java</exclude>
                             </excludes>
                         </configuration>
                     </plugin>
@@ -185,6 +187,7 @@
                             <ignoredResourcePatterns>
                                 <ignoredResourcePattern>parquet.thrift</ignoredResourcePattern>
                                 <ignoredResourcePattern>about.html</ignoredResourcePattern>
+                                <ignoredResourcePattern>mozilla/public-suffix-list.txt</ignoredResourcePattern>
                             </ignoredResourcePatterns>
                             <ignoredClassPatterns>
                                 <ignoredClassPattern>shaded.parquet.it.unimi.dsi.fastutil.*</ignoredClassPattern>
@@ -215,6 +218,7 @@
                             <ignoredResourcePatterns>
                                 <ignoredResourcePattern>parquet.thrift</ignoredResourcePattern>
                                 <ignoredResourcePattern>about.html</ignoredResourcePattern>
+                                <ignoredResourcePattern>mozilla/public-suffix-list.txt</ignoredResourcePattern>
                             </ignoredResourcePatterns>
                         </configuration>
                     </plugin>
@@ -232,6 +236,7 @@
                             <includes>
                                 <include>**/TestHiveFileSystemS3.java</include>
                                 <include>**/TestHiveFileSystemS3SelectCsvPushdown.java</include>
+                                <include>**/TestHiveFileSystemS3SelectCsvPushdownWithSplits.java</include>
                             </includes>
                         </configuration>
                     </plugin>
@@ -242,6 +247,7 @@
                             <ignoredResourcePatterns>
                                 <ignoredResourcePattern>parquet.thrift</ignoredResourcePattern>
                                 <ignoredResourcePattern>about.html</ignoredResourcePattern>
+                                <ignoredResourcePattern>mozilla/public-suffix-list.txt</ignoredResourcePattern>
                             </ignoredResourcePatterns>
                         </configuration>
                     </plugin>
@@ -258,6 +264,7 @@
                         <configuration>
                             <includes>
                                 <include>**/TestHiveFileSystemS3SelectJsonPushdown.java</include>
+                                <include>**/TestHiveFileSystemS3SelectJsonPushdownWithSplits.java</include>
                             </includes>
                         </configuration>
                     </plugin>
@@ -268,6 +275,7 @@
                             <ignoredResourcePatterns>
                                 <ignoredResourcePattern>parquet.thrift</ignoredResourcePattern>
                                 <ignoredResourcePattern>about.html</ignoredResourcePattern>
+                                <ignoredResourcePattern>mozilla/public-suffix-list.txt</ignoredResourcePattern>
                             </ignoredResourcePatterns>
                         </configuration>
                     </plugin>

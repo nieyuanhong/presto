@@ -80,10 +80,14 @@ public class PlanNodeStatsSummarizer
         Map<PlanNodeId, Long> planNodeOutputBytes = new HashMap<>();
         Map<PlanNodeId, Long> planNodeScheduledMillis = new HashMap<>();
         Map<PlanNodeId, Long> planNodeCpuMillis = new HashMap<>();
+        Map<PlanNodeId, Long> planNodeNullJoinBuildKeyCount = new HashMap<>();
+        Map<PlanNodeId, Long> planNodeJoinBuildKeyCount = new HashMap<>();
 
         Map<PlanNodeId, Map<String, OperatorInputStats>> operatorInputStats = new HashMap<>();
         Map<PlanNodeId, Map<String, OperatorHashCollisionsStats>> operatorHashCollisionsStats = new HashMap<>();
         Map<PlanNodeId, WindowOperatorStats> windowNodeStats = new HashMap<>();
+        List<TaskStats> nativeTaskStats = new ArrayList<>();
+        Set<PlanNodeId> nativePlanNodeIds = new HashSet<>();
 
         for (PipelineStats pipelineStats : taskStats.getPipelines()) {
             // Due to eventual consistently collected stats, these could be empty
@@ -147,6 +151,9 @@ public class PlanNodeStatsSummarizer
                 planNodeRawInputPositions.merge(planNodeId, operatorStats.getRawInputPositions(), Long::sum);
                 planNodeRawInputBytes.merge(planNodeId, operatorStats.getRawInputDataSize().toBytes(), Long::sum);
 
+                planNodeNullJoinBuildKeyCount.merge(planNodeId, operatorStats.getNullJoinBuildKeyCount(), Long::sum);
+                planNodeJoinBuildKeyCount.merge(planNodeId, operatorStats.getJoinBuildKeyCount(), Long::sum);
+
                 processedNodes.add(planNodeId);
             }
 
@@ -169,7 +176,15 @@ public class PlanNodeStatsSummarizer
             }
         }
 
+        // Convert native statistics.
+        // Remove statistics for the 'output' plan node to avoid double counting.
+        List<PlanNodeStats> nativePlanNodeStats = nativeTaskStats.stream()
+                .flatMap(stats -> getPlanNodeStats(stats).stream())
+                .filter(stats -> !nativePlanNodeIds.contains(stats.getPlanNodeId()))
+                .collect(toList());
+
         List<PlanNodeStats> stats = new ArrayList<>();
+        stats.addAll(nativePlanNodeStats);
         for (PlanNodeId planNodeId : planNodeIds) {
             if (!planNodeInputPositions.containsKey(planNodeId)) {
                 continue;
@@ -195,6 +210,8 @@ public class PlanNodeStatsSummarizer
                         outputPositions,
                         succinctDataSize(planNodeOutputBytes.getOrDefault(planNodeId, 0L), BYTE),
                         operatorInputStats.get(planNodeId),
+                        planNodeNullJoinBuildKeyCount.get(planNodeId),
+                        planNodeJoinBuildKeyCount.get(planNodeId),
                         operatorHashCollisionsStats.get(planNodeId));
             }
             else if (windowNodeStats.containsKey(planNodeId)) {
@@ -209,6 +226,8 @@ public class PlanNodeStatsSummarizer
                         outputPositions,
                         succinctDataSize(planNodeOutputBytes.getOrDefault(planNodeId, 0L), BYTE),
                         operatorInputStats.get(planNodeId),
+                        planNodeNullJoinBuildKeyCount.get(planNodeId),
+                        planNodeJoinBuildKeyCount.get(planNodeId),
                         windowNodeStats.get(planNodeId));
             }
             else {
@@ -222,7 +241,9 @@ public class PlanNodeStatsSummarizer
                         succinctDataSize(planNodeRawInputBytes.get(planNodeId), BYTE),
                         outputPositions,
                         succinctDataSize(planNodeOutputBytes.getOrDefault(planNodeId, 0L), BYTE),
-                        operatorInputStats.get(planNodeId));
+                        operatorInputStats.get(planNodeId),
+                        planNodeNullJoinBuildKeyCount.get(planNodeId),
+                        planNodeJoinBuildKeyCount.get(planNodeId));
             }
 
             stats.add(nodeStats);

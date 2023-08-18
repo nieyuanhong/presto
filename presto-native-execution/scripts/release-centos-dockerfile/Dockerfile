@@ -42,6 +42,7 @@ ENV PATH=${DEPENDENCY_DIR}/install/bin:${DEPENDENCY_DIR}/install/bin/hadoop-2.10
 ENV PRESTO_ENABLE_PARQUET=ON
 ENV PRESTO_ENABLE_S3=ON
 ENV PRESTO_ENABLE_HDFS=ON
+ENV PRESTO_ENABLE_REMOTE_FUNCTIONS=ON
 ENV PRESTO_ENABLE_TESTING=ON
 ENV CLEANUP_BUILD_ARTIFACTS=1
 
@@ -54,7 +55,9 @@ RUN --mount=type=ssh \
     set -exu && \
     dnf -y install openssh-clients git wget unzip make && \
     mkdir -p -m 0600 /root/.ssh && \
-    ! ssh-keyscan github.com >> /root/.ssh/known_hosts && \
+    ( \
+      ssh-keyscan github.com >> /root/.ssh/known_hosts || true \
+    ) && \
     git clone --progress ${PRESTODB_REPOSITORY} "${PRESTODB_HOME}/_repo" && \
     git -C "${PRESTODB_HOME}/_repo" checkout "${PRESTODB_CHECKOUT}" && \
     make --directory="${PRESTODB_HOME}/_repo/presto-native-execution" submodules && \
@@ -94,6 +97,7 @@ RUN --mount=type=ssh \
         PRESTO_ENABLE_PARQUET=${PRESTO_ENABLE_PARQUET} \
         PRESTO_ENABLE_S3=${PRESTO_ENABLE_S3} \
         PRESTO_ENABLE_HDFS=${PRESTO_ENABLE_HDFS} \
+        PRESTO_ENABLE_REMOTE_FUNCTIONS=${PRESTO_ENABLE_REMOTE_FUNCTIONS} \
         PRESTO_ENABLE_TESTING=${PRESTO_ENABLE_TESTING} \
         TREAT_WARNINGS_AS_ERRORS=OFF
 

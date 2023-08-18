@@ -147,6 +147,7 @@ import com.facebook.presto.spi.plan.FilterNode;
 import com.facebook.presto.spi.plan.LimitNode;
 import com.facebook.presto.spi.plan.MarkDistinctNode;
 import com.facebook.presto.spi.plan.OrderingScheme;
+import com.facebook.presto.spi.plan.OutputNode;
 import com.facebook.presto.spi.plan.PlanNode;
 import com.facebook.presto.spi.plan.PlanNodeId;
 import com.facebook.presto.spi.plan.ProjectNode;
@@ -188,7 +189,6 @@ import com.facebook.presto.sql.planner.plan.IndexSourceNode;
 import com.facebook.presto.sql.planner.plan.InternalPlanVisitor;
 import com.facebook.presto.sql.planner.plan.JoinNode;
 import com.facebook.presto.sql.planner.plan.MetadataDeleteNode;
-import com.facebook.presto.sql.planner.plan.OutputNode;
 import com.facebook.presto.sql.planner.plan.RemoteSourceNode;
 import com.facebook.presto.sql.planner.plan.RowNumberNode;
 import com.facebook.presto.sql.planner.plan.SampleNode;
@@ -206,6 +206,7 @@ import com.facebook.presto.sql.planner.plan.WindowNode;
 import com.facebook.presto.sql.planner.plan.WindowNode.Frame;
 import com.facebook.presto.sql.relational.FunctionResolution;
 import com.facebook.presto.sql.relational.VariableToChannelTranslator;
+import com.facebook.presto.sql.tree.SortItem;
 import com.facebook.presto.sql.tree.SymbolReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.annotations.VisibleForTesting;
@@ -263,6 +264,7 @@ import static com.facebook.presto.SystemSessionProperties.isExchangeChecksumEnab
 import static com.facebook.presto.SystemSessionProperties.isExchangeCompressionEnabled;
 import static com.facebook.presto.SystemSessionProperties.isJoinSpillingEnabled;
 import static com.facebook.presto.SystemSessionProperties.isOptimizeCommonSubExpressions;
+import static com.facebook.presto.SystemSessionProperties.isOptimizeJoinProbeForEmptyBuildRuntimeEnabled;
 import static com.facebook.presto.SystemSessionProperties.isOptimizedRepartitioningEnabled;
 import static com.facebook.presto.SystemSessionProperties.isOrderByAggregationSpillEnabled;
 import static com.facebook.presto.SystemSessionProperties.isOrderBySpillEnabled;
@@ -318,6 +320,8 @@ import static com.facebook.presto.sql.planner.plan.JoinNode.Type.FULL;
 import static com.facebook.presto.sql.planner.plan.JoinNode.Type.INNER;
 import static com.facebook.presto.sql.planner.plan.JoinNode.Type.RIGHT;
 import static com.facebook.presto.sql.relational.Expressions.constant;
+import static com.facebook.presto.sql.tree.SortItem.Ordering.ASCENDING;
+import static com.facebook.presto.sql.tree.SortItem.Ordering.DESCENDING;
 import static com.facebook.presto.util.Reflection.constructorMethodHandle;
 import static com.facebook.presto.util.SpatialJoinUtils.ST_CONTAINS;
 import static com.facebook.presto.util.SpatialJoinUtils.ST_CROSSES;
@@ -1116,17 +1120,40 @@ public class LocalExecutionPlanner
             ImmutableList.Builder<VariableReferenceExpression> windowFunctionOutputVariablesBuilder = ImmutableList.builder();
             for (Map.Entry<VariableReferenceExpression, WindowNode.Function> entry : node.getWindowFunctions().entrySet()) {
                 Optional<Integer> frameStartChannel = Optional.empty();
+                Optional<Integer> sortKeyChannelForStartComparison = Optional.empty();
                 Optional<Integer> frameEndChannel = Optional.empty();
+                Optional<Integer> sortKeyChannelForEndComparison = Optional.empty();
+                Optional<Integer> sortKeyChannel = Optional.empty();
+                Optional<SortItem.Ordering> ordering = Optional.empty();
 
                 Frame frame = entry.getValue().getFrame();
                 if (frame.getStartValue().isPresent()) {
                     frameStartChannel = Optional.of(source.getLayout().get(frame.getStartValue().get()));
                 }
+                if (frame.getSortKeyCoercedForFrameStartComparison().isPresent()) {
+                    sortKeyChannelForStartComparison = Optional.of(source.getLayout().get(frame.getSortKeyCoercedForFrameStartComparison().get()));
+                }
                 if (frame.getEndValue().isPresent()) {
                     frameEndChannel = Optional.of(source.getLayout().get(frame.getEndValue().get()));
                 }
+                if (frame.getSortKeyCoercedForFrameEndComparison().isPresent()) {
+                    sortKeyChannelForEndComparison = Optional.of(source.getLayout().get(frame.getSortKeyCoercedForFrameEndComparison().get()));
+                }
+                if (node.getOrderingScheme().isPresent()) {
+                    sortKeyChannel = Optional.of(sortChannels.get(0));
+                    ordering = Optional.of(sortOrder.get(0).isAscending() ? ASCENDING : DESCENDING);
+                }
 
-                FrameInfo frameInfo = new FrameInfo(frame.getType(), frame.getStartType(), frameStartChannel, frame.getEndType(), frameEndChannel);
+                FrameInfo frameInfo = new FrameInfo(
+                        frame.getType(),
+                        frame.getStartType(),
+                        frameStartChannel,
+                        sortKeyChannelForStartComparison,
+                        frame.getEndType(),
+                        frameEndChannel,
+                        sortKeyChannelForEndComparison,
+                        sortKeyChannel,
+                        ordering);
 
                 WindowNode.Function function = entry.getValue();
                 CallExpression call = function.getFunctionCall();
@@ -1265,7 +1292,8 @@ public class LocalExecutionPlanner
                     distinctChannels,
                     node.getLimit(),
                     hashChannel,
-                    joinCompiler);
+                    joinCompiler,
+                    node.getTimeoutMillis());
             return new PhysicalOperation(operatorFactory, makeLayout(node), context, source);
         }
 
@@ -1328,7 +1356,6 @@ public class LocalExecutionPlanner
                 return planGlobalAggregation(node, source, context);
             }
 
-            boolean spillEnabled = isSpillEnabled(context.getSession());
             DataSize unspillMemoryLimit = getAggregationOperatorUnspillMemoryLimit(context.getSession());
 
             return planGroupByAggregation(
@@ -1869,10 +1896,30 @@ public class LocalExecutionPlanner
             OptionalInt totalOperatorsCount = OptionalInt.empty(); // spill not supported for index joins
             switch (node.getType()) {
                 case INNER:
-                    lookupJoinOperatorFactory = lookupJoinOperators.innerJoin(context.getNextOperatorId(), node.getId(), lookupSourceFactoryManager, probeSource.getTypes(), probeChannels, probeHashChannel, Optional.empty(), totalOperatorsCount, partitioningSpillerFactory);
+                    lookupJoinOperatorFactory = lookupJoinOperators.innerJoin(
+                            context.getNextOperatorId(),
+                            node.getId(),
+                            lookupSourceFactoryManager,
+                            probeSource.getTypes(),
+                            probeChannels,
+                            probeHashChannel,
+                            Optional.empty(),
+                            totalOperatorsCount,
+                            partitioningSpillerFactory,
+                            false);
                     break;
                 case SOURCE_OUTER:
-                    lookupJoinOperatorFactory = lookupJoinOperators.probeOuterJoin(context.getNextOperatorId(), node.getId(), lookupSourceFactoryManager, probeSource.getTypes(), probeChannels, probeHashChannel, Optional.empty(), totalOperatorsCount, partitioningSpillerFactory);
+                    lookupJoinOperatorFactory = lookupJoinOperators.probeOuterJoin(
+                            context.getNextOperatorId(),
+                            node.getId(),
+                            lookupSourceFactoryManager,
+                            probeSource.getTypes(),
+                            probeChannels,
+                            probeHashChannel,
+                            Optional.empty(),
+                            totalOperatorsCount,
+                            partitioningSpillerFactory,
+                            false);
                     break;
                 default:
                     throw new AssertionError("Unknown type: " + node.getType());
@@ -2092,7 +2139,7 @@ public class LocalExecutionPlanner
 
             checkState(
                     buildSource.getPipelineExecutionStrategy() == UNGROUPED_EXECUTION,
-                    "Build source of a nested loop join is expected to be GROUPED_EXECUTION.");
+                    "Build source of a nested loop join is expected to be UNGROUPED_EXECUTION.");
             checkArgument(node.getType() == INNER, "NestedLoopJoin is only used for inner join");
 
             JoinBridgeManager<NestedLoopJoinBridge> nestedLoopJoinBridgeManager = new JoinBridgeManager<>(
@@ -2284,12 +2331,13 @@ public class LocalExecutionPlanner
             // spill does not work for probe only grouped execution because PartitionedLookupSourceFactory.finishProbe() expects a defined number of probe operators
             boolean isProbeOnlyGroupedExecution = probeSource.getPipelineExecutionStrategy() == GROUPED_EXECUTION && buildSource.getPipelineExecutionStrategy() != GROUPED_EXECUTION;
             boolean spillEnabled = isSpillEnabled(context.getSession()) && isJoinSpillingEnabled(context.getSession()) && !buildOuter && !isProbeOnlyGroupedExecution;
+            boolean optimizeProbeForEmptyBuild = isOptimizeJoinProbeForEmptyBuildRuntimeEnabled(context.getSession());
 
             // Plan build
             JoinBridgeManager<PartitionedLookupSourceFactory> lookupSourceFactory =
                     createLookupSourceFactory(node, buildSource, buildContext, buildVariables, buildHashVariable, probeSource, spillEnabled, context);
 
-            OperatorFactory operator = createLookupJoin(node, probeSource, probeVariables, probeHashVariable, lookupSourceFactory, spillEnabled, context);
+            OperatorFactory operator = createLookupJoin(node, probeSource, probeVariables, probeHashVariable, lookupSourceFactory, spillEnabled, optimizeProbeForEmptyBuild, context);
 
             ImmutableMap.Builder<VariableReferenceExpression, Integer> outputMappings = ImmutableMap.builder();
             List<VariableReferenceExpression> outputVariables = node.getOutputVariables();
@@ -2481,6 +2529,7 @@ public class LocalExecutionPlanner
                 Optional<VariableReferenceExpression> probeHashVariable,
                 JoinBridgeManager<? extends LookupSourceFactory> lookupSourceFactoryManager,
                 boolean spillEnabled,
+                boolean optimizeProbeForEmptyBuild,
                 LocalExecutionPlanContext context)
         {
             List<Type> probeTypes = probeSource.getTypes();
@@ -2495,13 +2544,53 @@ public class LocalExecutionPlanner
 
             switch (node.getType()) {
                 case INNER:
-                    return lookupJoinOperators.innerJoin(context.getNextOperatorId(), node.getId(), lookupSourceFactoryManager, probeTypes, probeJoinChannels, probeHashChannel, Optional.of(probeOutputChannels), totalOperatorsCount, partitioningSpillerFactory);
+                    return lookupJoinOperators.innerJoin(
+                            context.getNextOperatorId(),
+                            node.getId(),
+                            lookupSourceFactoryManager,
+                            probeTypes,
+                            probeJoinChannels,
+                            probeHashChannel,
+                            Optional.of(probeOutputChannels),
+                            totalOperatorsCount,
+                            partitioningSpillerFactory,
+                            optimizeProbeForEmptyBuild);
                 case LEFT:
-                    return lookupJoinOperators.probeOuterJoin(context.getNextOperatorId(), node.getId(), lookupSourceFactoryManager, probeTypes, probeJoinChannels, probeHashChannel, Optional.of(probeOutputChannels), totalOperatorsCount, partitioningSpillerFactory);
+                    return lookupJoinOperators.probeOuterJoin(
+                            context.getNextOperatorId(),
+                            node.getId(),
+                            lookupSourceFactoryManager,
+                            probeTypes,
+                            probeJoinChannels,
+                            probeHashChannel,
+                            Optional.of(probeOutputChannels),
+                            totalOperatorsCount,
+                            partitioningSpillerFactory,
+                            optimizeProbeForEmptyBuild);
                 case RIGHT:
-                    return lookupJoinOperators.lookupOuterJoin(context.getNextOperatorId(), node.getId(), lookupSourceFactoryManager, probeTypes, probeJoinChannels, probeHashChannel, Optional.of(probeOutputChannels), totalOperatorsCount, partitioningSpillerFactory);
+                    return lookupJoinOperators.lookupOuterJoin(
+                            context.getNextOperatorId(),
+                            node.getId(),
+                            lookupSourceFactoryManager,
+                            probeTypes,
+                            probeJoinChannels,
+                            probeHashChannel,
+                            Optional.of(probeOutputChannels),
+                            totalOperatorsCount,
+                            partitioningSpillerFactory,
+                            optimizeProbeForEmptyBuild);
                 case FULL:
-                    return lookupJoinOperators.fullOuterJoin(context.getNextOperatorId(), node.getId(), lookupSourceFactoryManager, probeTypes, probeJoinChannels, probeHashChannel, Optional.of(probeOutputChannels), totalOperatorsCount, partitioningSpillerFactory);
+                    return lookupJoinOperators.fullOuterJoin(
+                            context.getNextOperatorId(),
+                            node.getId(),
+                            lookupSourceFactoryManager,
+                            probeTypes,
+                            probeJoinChannels,
+                            probeHashChannel,
+                            Optional.of(probeOutputChannels),
+                            totalOperatorsCount,
+                            partitioningSpillerFactory,
+                            optimizeProbeForEmptyBuild);
                 default:
                     throw new UnsupportedOperationException("Unsupported join type: " + node.getType());
             }
@@ -3061,7 +3150,7 @@ public class LocalExecutionPlanner
             List<Integer> valueChannels = new ArrayList<>();
             for (RowExpression argument : aggregation.getArguments()) {
                 if (!(argument instanceof LambdaDefinitionExpression)) {
-                    checkArgument(argument instanceof VariableReferenceExpression, "argument must be variable reference");
+                    checkArgument(argument instanceof VariableReferenceExpression, "argument: " + argument + " must be variable reference");
                     valueChannels.add(source.getLayout().get(argument));
                 }
             }

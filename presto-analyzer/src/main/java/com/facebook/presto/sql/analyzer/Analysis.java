@@ -15,12 +15,18 @@ package com.facebook.presto.sql.analyzer;
 
 import com.facebook.presto.common.QualifiedObjectName;
 import com.facebook.presto.common.Subfield;
+import com.facebook.presto.common.transaction.TransactionId;
 import com.facebook.presto.common.type.Type;
 import com.facebook.presto.spi.ColumnHandle;
 import com.facebook.presto.spi.TableHandle;
+import com.facebook.presto.spi.analyzer.AccessControlInfo;
+import com.facebook.presto.spi.analyzer.AccessControlInfoForTable;
+import com.facebook.presto.spi.analyzer.AccessControlReferences;
+import com.facebook.presto.spi.analyzer.AccessControlRole;
 import com.facebook.presto.spi.function.FunctionHandle;
 import com.facebook.presto.spi.function.FunctionKind;
 import com.facebook.presto.spi.security.AccessControl;
+import com.facebook.presto.spi.security.AccessControlContext;
 import com.facebook.presto.spi.security.AllowAllAccessControl;
 import com.facebook.presto.spi.security.Identity;
 import com.facebook.presto.sql.tree.ExistsPredicate;
@@ -63,7 +69,6 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 
@@ -97,6 +102,8 @@ public class Analysis
     private final Map<NodeRef<Node>, Scope> scopes = new LinkedHashMap<>();
     private final Multimap<NodeRef<Expression>, FieldId> columnReferences = ArrayListMultimap.create();
 
+    private final AccessControlReferences accessControlReferences = new AccessControlReferences();
+
     // a map of users to the columns per table that they access
     private final Map<AccessControlInfo, Map<QualifiedObjectName, Set<String>>> tableColumnReferences = new LinkedHashMap<>();
     private final Map<AccessControlInfo, Map<QualifiedObjectName, Set<String>>> utilizedTableColumnReferences = new LinkedHashMap<>();
@@ -124,10 +131,20 @@ public class Analysis
     private final ListMultimap<NodeRef<Node>, ExistsPredicate> existsSubqueries = ArrayListMultimap.create();
     private final ListMultimap<NodeRef<Node>, QuantifiedComparisonExpression> quantifiedComparisonSubqueries = ArrayListMultimap.create();
 
+    private final MetadataHandle metadataHandle = new MetadataHandle();
     private final Map<NodeRef<Table>, TableHandle> tables = new LinkedHashMap<>();
 
     private final Map<NodeRef<Expression>, Type> types = new LinkedHashMap<>();
     private final Map<NodeRef<Expression>, Type> coercions = new LinkedHashMap<>();
+    // Coercions needed for window function frame of type RANGE.
+    // These are coercions for the sort key, needed for frame bound calculation, identified by frame range offset expression.
+    // Frame definition might contain two different offset expressions (for start and end), each requiring different coercion of the sort key.
+    private final Map<NodeRef<Expression>, Type> sortKeyCoercionsForFrameBoundCalculation = new LinkedHashMap<>();
+    // Coercions needed for window function frame of type RANGE.
+    // These are coercions for the sort key, needed for comparison of the sort key with precomputed frame bound, identified by frame range offset expression.
+    private final Map<NodeRef<Expression>, Type> sortKeyCoercionsForFrameBoundComparison = new LinkedHashMap<>();
+    // Functions for calculating frame bounds for frame of type RANGE, identified by frame range offset expression.
+    private final Map<NodeRef<Expression>, FunctionHandle> frameBoundCalculations = new LinkedHashMap<>();
     private final Set<NodeRef<Expression>> typeOnlyCoercions = new LinkedHashSet<>();
     private final Map<NodeRef<Relation>, List<Type>> relationCoercions = new LinkedHashMap<>();
     private final Map<NodeRef<FunctionCall>, FunctionHandle> functionHandles = new LinkedHashMap<>();
@@ -488,6 +505,11 @@ public class Analysis
         return getScope(node).getRelationType();
     }
 
+    public MetadataHandle getMetadataHandle()
+    {
+        return metadataHandle;
+    }
+
     public TableHandle getTableHandle(Table table)
     {
         return tables.get(NodeRef.of(table));
@@ -553,10 +575,36 @@ public class Analysis
         }
     }
 
-    public void addCoercions(Map<NodeRef<Expression>, Type> coercions, Set<NodeRef<Expression>> typeOnlyCoercions)
+    public void addCoercions(
+            Map<NodeRef<Expression>, Type> coercions,
+            Set<NodeRef<Expression>> typeOnlyCoercions,
+            Map<NodeRef<Expression>, Type> sortKeyCoercionsForFrameBoundCalculation,
+            Map<NodeRef<Expression>, Type> sortKeyCoercionsForFrameBoundComparison)
     {
         this.coercions.putAll(coercions);
         this.typeOnlyCoercions.addAll(typeOnlyCoercions);
+        this.sortKeyCoercionsForFrameBoundCalculation.putAll(sortKeyCoercionsForFrameBoundCalculation);
+        this.sortKeyCoercionsForFrameBoundComparison.putAll(sortKeyCoercionsForFrameBoundComparison);
+    }
+
+    public Type getSortKeyCoercionForFrameBoundCalculation(Expression frameOffset)
+    {
+        return sortKeyCoercionsForFrameBoundCalculation.get(NodeRef.of(frameOffset));
+    }
+
+    public Type getSortKeyCoercionForFrameBoundComparison(Expression frameOffset)
+    {
+        return sortKeyCoercionsForFrameBoundComparison.get(NodeRef.of(frameOffset));
+    }
+
+    public void addFrameBoundCalculations(Map<NodeRef<Expression>, FunctionHandle> frameBoundCalculations)
+    {
+        this.frameBoundCalculations.putAll(frameBoundCalculations);
+    }
+
+    public FunctionHandle getFrameBoundCalculation(Expression frameOffset)
+    {
+        return frameBoundCalculations.get(NodeRef.of(frameOffset));
     }
 
     public Expression getHaving(QuerySpecification query)
@@ -767,9 +815,25 @@ public class Analysis
         return joinUsing.get(NodeRef.of(node));
     }
 
-    public void addTableColumnAndSubfieldReferences(AccessControl accessControl, Identity identity, Multimap<QualifiedObjectName, Subfield> tableColumnMap, Multimap<QualifiedObjectName, Subfield> tableColumnMapForAccessControl)
+    public AccessControlReferences getAccessControlReferences()
     {
-        AccessControlInfo accessControlInfo = new AccessControlInfo(accessControl, identity);
+        return accessControlReferences;
+    }
+
+    public void addAccessControlCheckForTable(AccessControlRole accessControlRole, AccessControlInfoForTable accessControlInfoForTable)
+    {
+        accessControlReferences.addTableReference(accessControlRole, accessControlInfoForTable);
+    }
+
+    public void addTableColumnAndSubfieldReferences(
+            AccessControl accessControl,
+            Identity identity,
+            Optional<TransactionId> transactionId,
+            AccessControlContext accessControlContext,
+            Multimap<QualifiedObjectName, Subfield> tableColumnMap,
+            Multimap<QualifiedObjectName, Subfield> tableColumnMapForAccessControl)
+    {
+        AccessControlInfo accessControlInfo = new AccessControlInfo(accessControl, identity, transactionId, accessControlContext);
         Map<QualifiedObjectName, Set<String>> columnReferences = tableColumnReferences.computeIfAbsent(accessControlInfo, k -> new LinkedHashMap<>());
         tableColumnMap.asMap()
                 .forEach((key, value) -> columnReferences.computeIfAbsent(key, k -> new HashSet<>()).addAll(value.stream().map(Subfield::getRootName).collect(toImmutableSet())));
@@ -779,9 +843,9 @@ public class Analysis
                 .forEach((key, value) -> columnAndSubfieldReferences.computeIfAbsent(key, k -> new HashSet<>()).addAll(value));
     }
 
-    public void addEmptyColumnReferencesForTable(AccessControl accessControl, Identity identity, QualifiedObjectName table)
+    public void addEmptyColumnReferencesForTable(AccessControl accessControl, Identity identity, Optional<TransactionId> transactionId, AccessControlContext accessControlContext, QualifiedObjectName table)
     {
-        AccessControlInfo accessControlInfo = new AccessControlInfo(accessControl, identity);
+        AccessControlInfo accessControlInfo = new AccessControlInfo(accessControl, identity, transactionId, accessControlContext);
         tableColumnReferences.computeIfAbsent(accessControlInfo, k -> new LinkedHashMap<>()).computeIfAbsent(table, k -> new HashSet<>());
         tableColumnAndSubfieldReferences.computeIfAbsent(accessControlInfo, k -> new LinkedHashMap<>()).computeIfAbsent(table, k -> new HashSet<>());
     }
@@ -801,7 +865,12 @@ public class Analysis
         return ImmutableMap.copyOf(utilizedTableColumnReferences);
     }
 
-    public Map<AccessControlInfo, Map<QualifiedObjectName, Set<Subfield>>> getTableColumnAndSubfieldReferencesForAccessControl(boolean checkAccessControlOnUtilizedColumnsOnly, boolean checkAccessControlWithSubfields)
+    public void populateTableColumnAndSubfieldReferencesForAccessControl(boolean checkAccessControlOnUtilizedColumnsOnly, boolean checkAccessControlWithSubfields)
+    {
+        accessControlReferences.addTableColumnAndSubfieldReferencesForAccessControl(getTableColumnAndSubfieldReferencesForAccessControl(checkAccessControlOnUtilizedColumnsOnly, checkAccessControlWithSubfields));
+    }
+
+    private Map<AccessControlInfo, Map<QualifiedObjectName, Set<Subfield>>> getTableColumnAndSubfieldReferencesForAccessControl(boolean checkAccessControlOnUtilizedColumnsOnly, boolean checkAccessControlWithSubfields)
     {
         Map<AccessControlInfo, Map<QualifiedObjectName, Set<Subfield>>> references;
         if (!checkAccessControlWithSubfields) {
@@ -849,7 +918,7 @@ public class Analysis
         Map<AccessControlInfo, Map<QualifiedObjectName, Set<Subfield>>> newTableColumnReferences = new LinkedHashMap<>();
 
         tableColumnReferences.forEach((accessControlInfo, references) -> {
-            AccessControlInfo allowAllAccessControlInfo = new AccessControlInfo(new AllowAllAccessControl(), accessControlInfo.getIdentity());
+            AccessControlInfo allowAllAccessControlInfo = new AccessControlInfo(new AllowAllAccessControl(), accessControlInfo.getIdentity(), accessControlInfo.getTransactionId(), accessControlInfo.getAccessControlContext());
             Map<QualifiedObjectName, Set<Subfield>> newAllowAllReferences = newTableColumnReferences.getOrDefault(allowAllAccessControlInfo, new LinkedHashMap<>());
 
             Map<QualifiedObjectName, Set<Subfield>> newOtherReferences = new LinkedHashMap<>();
@@ -1071,55 +1140,6 @@ public class Analysis
         public boolean isVisiting()
         {
             return this.value == VISITING.value;
-        }
-    }
-
-    public static final class AccessControlInfo
-    {
-        private final AccessControl accessControl;
-        private final Identity identity;
-
-        public AccessControlInfo(AccessControl accessControl, Identity identity)
-        {
-            this.accessControl = requireNonNull(accessControl, "accessControl is null");
-            this.identity = requireNonNull(identity, "identity is null");
-        }
-
-        public AccessControl getAccessControl()
-        {
-            return accessControl;
-        }
-
-        public Identity getIdentity()
-        {
-            return identity;
-        }
-
-        @Override
-        public boolean equals(Object o)
-        {
-            if (this == o) {
-                return true;
-            }
-            if (o == null || getClass() != o.getClass()) {
-                return false;
-            }
-
-            AccessControlInfo that = (AccessControlInfo) o;
-            return Objects.equals(accessControl, that.accessControl) &&
-                    Objects.equals(identity, that.identity);
-        }
-
-        @Override
-        public int hashCode()
-        {
-            return Objects.hash(accessControl, identity);
-        }
-
-        @Override
-        public String toString()
-        {
-            return format("AccessControl: %s, Identity: %s", accessControl.getClass(), identity);
         }
     }
 }

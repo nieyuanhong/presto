@@ -15,19 +15,26 @@ package com.facebook.presto.sql.planner;
 
 import com.facebook.presto.Session;
 import com.facebook.presto.common.plan.PlanCanonicalizationStrategy;
+import com.facebook.presto.cost.HistoryBasedPlanStatisticsCalculator;
+import com.facebook.presto.spi.Plugin;
 import com.facebook.presto.spi.plan.AggregationNode;
 import com.facebook.presto.spi.plan.FilterNode;
 import com.facebook.presto.spi.plan.PlanNode;
 import com.facebook.presto.spi.plan.ProjectNode;
 import com.facebook.presto.spi.plan.TableScanNode;
+import com.facebook.presto.spi.statistics.HistoryBasedPlanStatisticsProvider;
 import com.facebook.presto.sql.Optimizer;
 import com.facebook.presto.sql.planner.assertions.BasePlanTest;
+import com.facebook.presto.testing.InMemoryHistoryBasedPlanStatisticsProvider;
+import com.facebook.presto.testing.LocalQueryRunner;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import org.testng.annotations.Test;
 
 import java.util.List;
 
 import static com.facebook.presto.SystemSessionProperties.USE_HISTORY_BASED_PLAN_STATISTICS;
+import static com.facebook.presto.SystemSessionProperties.USE_PERFECTLY_CONSISTENT_HISTORIES;
 import static com.facebook.presto.common.plan.PlanCanonicalizationStrategy.CONNECTOR;
 import static com.facebook.presto.common.plan.PlanCanonicalizationStrategy.REMOVE_SAFE_CONSTANTS;
 import static com.facebook.presto.sql.planner.CanonicalPlanGenerator.generateCanonicalPlan;
@@ -42,6 +49,28 @@ import static org.testng.Assert.assertTrue;
 public class TestCanonicalPlanHashes
         extends BasePlanTest
 {
+    public TestCanonicalPlanHashes()
+    {
+        super(() -> createTestQueryRunner());
+    }
+
+    private static LocalQueryRunner createTestQueryRunner()
+    {
+        LocalQueryRunner queryRunner = createQueryRunner(ImmutableMap.of());
+        queryRunner.installPlugin(new Plugin()
+        {
+            @Override
+            public Iterable<HistoryBasedPlanStatisticsProvider> getHistoryBasedPlanStatisticsProviders()
+            {
+                return ImmutableList.of(new InMemoryHistoryBasedPlanStatisticsProvider());
+            }
+        });
+        if (queryRunner.getStatsCalculator() instanceof HistoryBasedPlanStatisticsCalculator) {
+            ((HistoryBasedPlanStatisticsCalculator) queryRunner.getStatsCalculator()).setPrefetchForAllPlanNodes(true);
+        }
+        return queryRunner;
+    }
+
     @Test
     public void testScanFilterProject()
             throws Exception
@@ -336,6 +365,7 @@ public class TestCanonicalPlanHashes
                 .setCatalog("local")
                 .setSchema("tiny")
                 .setSystemProperty(USE_HISTORY_BASED_PLAN_STATISTICS, "true")
+                .setSystemProperty(USE_PERFECTLY_CONSISTENT_HISTORIES, "true")
                 .setSystemProperty("task_concurrency", "1")
                 .build();
     }
@@ -375,6 +405,6 @@ public class TestCanonicalPlanHashes
         Session session = createSession();
         PlanNode plan = plan(sql, Optimizer.PlanStage.OPTIMIZED_AND_VALIDATED, session).getRoot();
         assertTrue(plan.getStatsEquivalentPlanNode().isPresent());
-        return getObjectMapper().writeValueAsString(generateCanonicalPlan(plan.getStatsEquivalentPlanNode().get(), strategy, getObjectMapper()).get());
+        return getObjectMapper().writeValueAsString(generateCanonicalPlan(plan.getStatsEquivalentPlanNode().get(), strategy, getObjectMapper(), session).get());
     }
 }

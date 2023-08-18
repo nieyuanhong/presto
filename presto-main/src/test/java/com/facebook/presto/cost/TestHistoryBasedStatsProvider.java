@@ -67,6 +67,9 @@ public class TestHistoryBasedStatsProvider
                 return ImmutableList.of(new TestHistoryBasedPlanStatisticsProvider());
             }
         });
+        if (queryRunner.getStatsCalculator() instanceof HistoryBasedPlanStatisticsCalculator) {
+            ((HistoryBasedPlanStatisticsCalculator) queryRunner.getStatsCalculator()).setPrefetchForAllPlanNodes(true);
+        }
     }
 
     @Test
@@ -111,7 +114,7 @@ public class TestHistoryBasedStatsProvider
         }
 
         @Override
-        public Map<PlanNodeWithHash, HistoricalPlanStatistics> getStats(List<PlanNodeWithHash> planNodeHashes)
+        public Map<PlanNodeWithHash, HistoricalPlanStatistics> getStats(List<PlanNodeWithHash> planNodeHashes, long timeoutInMilliSeconds)
         {
             return planNodeHashes.stream().collect(toImmutableMap(
                     PlanNodeWithHash -> PlanNodeWithHash,
@@ -120,8 +123,8 @@ public class TestHistoryBasedStatsProvider
                             TableScanNode node = (TableScanNode) PlanNodeWithHash.getPlanNode();
                             if (node.getTable().toString().contains("orders")) {
                                 return new HistoricalPlanStatistics(ImmutableList.of(new HistoricalPlanStatisticsEntry(
-                                        new PlanStatistics(Estimate.of(100), Estimate.of(1000), 1),
-                                        ImmutableList.of(new PlanStatistics(Estimate.of(15000), Estimate.unknown(), 1)))));
+                                        new PlanStatistics(Estimate.of(100), Estimate.of(1000), 1, Estimate.unknown(), Estimate.unknown()),
+                                        ImmutableList.of(new PlanStatistics(Estimate.of(15000), Estimate.unknown(), 1, Estimate.unknown(), Estimate.unknown())))));
                             }
                         }
                         return HistoricalPlanStatistics.empty();
